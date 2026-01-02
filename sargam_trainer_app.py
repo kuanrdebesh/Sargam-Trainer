@@ -351,6 +351,57 @@ st.title("🎵 Sargam Trainer — Debesh's Version")
 
 st.markdown("Practice random sargam note recognition with tempo control.")
 
+with st.expander("📌 How to use", expanded=False):
+    st.markdown("""
+## 🎵 Sequence Practice (Guess-first)
+1. Select your **settings** from the left panel.
+2. Click **Generate New Sequence**.
+3. Click **Play Sequence** and try to identify the notes by ear.
+4. Once you’ve made a guess, click **Reveal Notes** to check.
+5. Generate a new sequence and repeat.
+
+---
+
+## 🎧 Ear Tuning (Pitch reference)
+Use this when you want to *learn or re-confirm* how each note sounds.
+
+1. Click **Play all notes** under Ear Tuning.
+2. The currently playing note will be highlighted.
+3. Match the pitch by humming or singing along.
+
+---
+
+## ⚙️ Settings Explained
+
+### 🎼 Notes / Swaras
+Choose which swaras you want to practice with.
+- Fewer notes → easier (good for beginners)
+- More notes → harder (better ear discrimination)
+
+### ⏱️ Note Duration
+Controls how long **each note is played**.
+- Longer duration → easier to identify
+- Shorter duration → harder, faster recognition
+
+### 🔁 Playback Mode
+- **Play all at once (default)**: one continuous sequence (recommended)
+- **Play each individually**: separate players per note (slow practice)
+
+### 🎚️ Sequence Length
+How many notes are in one sequence.
+- Start with 3–4 notes
+- Increase gradually as your ear improves
+
+---
+
+## 🧠 Practice Tips
+- Try guessing before revealing notes.
+- Repeat the same settings for a few minutes.
+- Use **Ear Tuning** whenever a note feels confusing.
+- Headphones recommended 🎧
+""")
+
+
 # ----------- Settings Sidebar -----------
 st.sidebar.header("Settings")
 
