@@ -10,8 +10,8 @@ import base64
 # Globals
 # ==========================================
 SAMPLE_RATE = 44100
-VOLUME = 0.2
-
+NOTE_VOLUME = 0.25
+TANPURA_VOLUME = 0.65
 WESTERN_SA_MAP = {
     "C": 261.63, "C#": 277.18, "DB": 277.18,
     "D": 293.66, "D#": 311.13, "EB": 311.13,
@@ -75,11 +75,94 @@ RAGA_DEF = {
 # - Generates WAV bytes and plays in browser via st.audio()
 # ==========================================
 
-def _tone_wave(freq: float, duration: float, sr: int = SAMPLE_RATE, volume: float = VOLUME) -> np.ndarray:
-    """Return a mono waveform in float32 range [-1, 1]."""
-    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
-    wave_ = np.sin(2 * np.pi * freq * t) * volume
-    return wave_.astype(np.float32)
+def _adsr_envelope(n: int, sr: int, attack: float = 0.01, decay: float = 0.08, sustain: float = 0.70, release: float = 0.14) -> np.ndarray:
+    """Simple ADSR envelope."""
+    attack_n = max(1, int(sr * attack))
+    decay_n = max(1, int(sr * decay))
+    release_n = max(1, int(sr * release))
+    sustain_n = max(0, n - (attack_n + decay_n + release_n))
+
+    a = np.linspace(0.0, 1.0, attack_n, endpoint=False)
+    d = np.linspace(1.0, sustain, decay_n, endpoint=False)
+    s = np.full(sustain_n, sustain, dtype=np.float32)
+    r = np.linspace(sustain, 0.0, release_n, endpoint=True)
+
+    env = np.concatenate([a, d, s, r]).astype(np.float32)
+    if env.size < n:
+        env = np.pad(env, (0, n - env.size))
+    else:
+        env = env[:n]
+    return env
+
+def _one_pole_lowpass(x: np.ndarray, sr: int, cutoff_hz: float = 3800.0) -> np.ndarray:
+    """Light low-pass filter for a softer, less 'beepy' tone."""
+    if cutoff_hz <= 0:
+        return x
+    # One-pole low-pass: y[n] = (1-a)*x[n] + a*y[n-1]
+    a = float(np.exp(-2.0 * np.pi * cutoff_hz / sr))
+    y = np.empty_like(x, dtype=np.float32)
+    y0 = 0.0
+    one_minus_a = 1.0 - a
+    for i in range(x.size):
+        y0 = one_minus_a * x[i] + a * y0
+        y[i] = y0
+    return y
+
+def _tiny_reverb(x: np.ndarray, sr: int) -> np.ndarray:
+    """Very small reverb/room feel using a few short delays."""
+    delays_ms = [28, 41, 57]
+    gains = [0.25, 0.18, 0.12]
+    y = x.astype(np.float32).copy()
+    for d_ms, g in zip(delays_ms, gains):
+        d = int(sr * (d_ms / 1000.0))
+        if d <= 0 or d >= y.size:
+            continue
+        y[d:] += g * x[:-d]
+    # gentle damping
+    y = _one_pole_lowpass(y, sr, cutoff_hz=5200.0)
+    return y
+
+def _tone_wave(freq: float, duration: float, sr: int = SAMPLE_RATE, volume: float = NOTE_VOLUME) -> np.ndarray:
+    """More natural tone: harmonics + slight detune + ADSR + soft filtering."""
+    n = int(sr * duration)
+    if n <= 0:
+        return np.zeros(0, dtype=np.float32)
+
+    t = np.linspace(0, duration, n, endpoint=False, dtype=np.float32)
+
+    # Add harmonics (string-like): 1..8 with rolloff.
+    # Slight random detune per note to avoid robotic feel.
+    detune_cents = np.random.uniform(-4.0, 4.0)
+    detune = 2 ** (detune_cents / 1200.0)
+    f0 = freq * detune
+
+    sig = np.zeros(n, dtype=np.float32)
+    # Fundamental stronger, higher harmonics softer
+    for k in range(1, 9):
+        amp = 1.0 / (k ** 1.25)
+        # tiny per-harmonic detune for richness
+        fk = f0 * k * (1.0 + np.random.uniform(-0.0008, 0.0008))
+        sig += amp * np.sin(2 * np.pi * fk * t)
+
+    # Breath/noise very subtly (attack realism)
+    noise = np.random.normal(0.0, 1.0, n).astype(np.float32)
+    noise_env = _adsr_envelope(n, sr, attack=0.002, decay=0.05, sustain=0.0, release=0.05)
+    sig += 0.03 * noise * noise_env
+
+    # Envelope & tone shaping
+    env = _adsr_envelope(n, sr, attack=0.008, decay=0.10, sustain=0.72, release=0.16)
+    sig *= env
+
+    # Softer top-end + a hint of room
+    sig = _one_pole_lowpass(sig, sr, cutoff_hz=4200.0)
+    sig = _tiny_reverb(sig, sr)
+
+    # Normalize gently and apply volume
+    peak = float(np.max(np.abs(sig))) if sig.size else 1.0
+    if peak > 0:
+        sig = sig / peak
+    sig *= float(volume)
+    return sig.astype(np.float32)
 
 def _wav_bytes(waveform: np.ndarray, sr: int = SAMPLE_RATE) -> bytes:
     """Convert float32 waveform [-1,1] to 16-bit PCM WAV bytes."""
@@ -319,50 +402,91 @@ play_mode = st.sidebar.radio(
 
 st.sidebar.subheader("Tanpura (Drone)")
 tanpura_on = st.sidebar.checkbox("Enable Tanpura", value=False)
-tanpura_level = st.sidebar.slider("Tanpura volume", 0.0, 1.0, 0.25, 0.05) if tanpura_on else 0.0
+tanpura_level = st.sidebar.slider("Tanpura volume", 0.0, 1.0, 0.6, 0.05) if tanpura_on else 0.0
+
+def _tanpura_pluck(freq: float, sr: int, pluck_len: float = 2.4) -> np.ndarray:
+    """A tanpura-like pluck with long decay and rich harmonics."""
+    n = int(sr * pluck_len)
+    t = np.linspace(0, pluck_len, n, endpoint=False, dtype=np.float32)
+
+    # Harmonics for a string drone (tanpura-ish)
+    sig = np.zeros(n, dtype=np.float32)
+    for k in range(1, 13):
+        amp = 1.0 / (k ** 1.15)
+        # slightly stronger odd harmonics for woody feel
+        if k % 2 == 1:
+            amp *= 1.12
+        fk = freq * k * (1.0 + np.random.uniform(-0.0004, 0.0004))
+        sig += amp * np.sin(2 * np.pi * fk * t)
+
+    # Very long, smooth decay envelope
+    env = _adsr_envelope(n, sr, attack=0.004, decay=0.18, sustain=0.55, release=1.2)
+    sig *= env
+
+    # Slight buzzing/noise at the beginning (jawari feel)
+    noise = np.random.normal(0.0, 1.0, n).astype(np.float32)
+    buzz_env = _adsr_envelope(n, sr, attack=0.001, decay=0.07, sustain=0.0, release=0.05)
+    sig += 0.06 * noise * buzz_env
+
+    sig = _one_pole_lowpass(sig, sr, cutoff_hz=3200.0)
+    return sig.astype(np.float32)
 
 def build_tanpura_wav_bytes(sa_freq: float, seconds: float = 60.0, sr: int = SAMPLE_RATE, level: float = 0.25) -> bytes:
-    """A simple tanpura-style drone (Sa + Pa + upper Sa)."""
+    """Tanpura-style drone using repeated plucks (Sa–Pa–Sa–Sa')."""
     if level <= 0:
         return b""
-    t = np.linspace(0, seconds, int(sr * seconds), endpoint=False)
-    # Sa, Pa, upper Sa
+    total_n = int(sr * seconds)
+    if total_n <= 0:
+        return b""
+
+    out = np.zeros(total_n, dtype=np.float32)
+
     pa = sa_freq * (3/2)
-    upper_sa = sa_freq * 2
-    drone = (
-        np.sin(2 * np.pi * sa_freq * t) +
-        0.7 * np.sin(2 * np.pi * pa * t) +
-        0.5 * np.sin(2 * np.pi * upper_sa * t)
-    )
-    # gentle amplitude modulation to feel less static
-    mod = 0.85 + 0.15 * np.sin(2 * np.pi * 0.25 * t)
-    drone = drone * mod
-    drone = drone / np.max(np.abs(drone) + 1e-9)
-    drone = drone.astype(np.float32) * (VOLUME * level)
-    return _wav_bytes(drone, sr=sr)
+    upper_sa = sa_freq * 2.0
 
-# ----------- Playback Output (placeholders to avoid stacking) -----------
-audio_area = st.empty()
-tuning_area = st.empty()
-tanpura_area = st.empty()
+    # Typical tanpura cycle (approx): Sa, Pa, Sa, upper Sa (varies by style)
+    cycle = [sa_freq, pa, sa_freq, upper_sa]
+    interval = 1.65  # seconds between plucks (feel free to tweak)
+    pluck_len = 2.8  # pluck tail overlaps next pluck
 
-# Render tanpura if enabled
+    t0 = 0.0
+    idx = 0
+    while t0 < seconds:
+        f = cycle[idx % len(cycle)]
+        pl = _tanpura_pluck(f, sr=sr, pluck_len=pluck_len)
+        start = int(t0 * sr)
+        end = min(total_n, start + pl.size)
+        if start < total_n:
+            out[start:end] += pl[:end-start]
+        t0 += interval
+        idx += 1
+
+    # Gentle slow amplitude motion
+    t = np.linspace(0, seconds, total_n, endpoint=False, dtype=np.float32)
+    mod = 0.92 + 0.08 * np.sin(2 * np.pi * 0.18 * t + 0.5)
+    out *= mod
+
+    # A bit more room + normalize
+    out = _tiny_reverb(out, sr)
+    peak = float(np.max(np.abs(out))) if out.size else 1.0
+    if peak > 0:
+        out = out / peak
+
+    out = out.astype(np.float32) * (TANPURA_VOLUME * level)
+    return _wav_bytes(out, sr=sr)
+
+# Render tanpura if enabled (in sidebar so it doesn't clash with players below)
 if tanpura_on:
-    tanp_wav = build_tanpura_wav_bytes(WESTERN_SA_MAP[sa], seconds=120.0, level=tanpura_level)
+    tanp_wav = build_tanpura_wav_bytes(WESTERN_SA_MAP[sa], seconds=180.0, level=tanpura_level)
     if tanp_wav:
-        with tanpura_area.container():
-            st.markdown("**Tanpura (loop)**")
-            # Use the HTML player so we can loop
-            render_audio_with_highlight(
-                tanp_wav,
-                labels=["Sa (drone)"],
-                note_duration=120.0,
-                gap=0.0,
-                loop=True,
-                element_id="tanpura",
-            )
+        st.sidebar.markdown("### 🎶 Tanpura")
+        st.sidebar.caption("Press play to start the drone (long track). Adjust volume with the slider above.")
+        st.sidebar.audio(tanp_wav, format="audio/wav")
+    else:
+        st.sidebar.info("Tanpura is enabled but volume is 0.")
 
 # ----------- Sequence Playback -----------
+audio_area = st.empty()
 if "seq" in st.session_state:
     seq = st.session_state["seq"]
     pool = st.session_state.get("pool")
@@ -375,24 +499,20 @@ if "seq" in st.session_state:
                 if play_mode == "Each note individually":
                     st.markdown("**Sequence (individual notes)**")
                     for i, sym in enumerate(seq, start=1):
-                        st.write(f"{i}. {sym}")
+                        st.write(f"Note {i}")
                         wav = build_sequence_wav_bytes([pool[sym]], note_duration=duration)
                         st.audio(wav, format="audio/wav")
                 else:
                     st.markdown("**Sequence (all at once)**")
+                    st.caption("Notes are hidden until you click **Reveal Notes**.")
                     wav = build_sequence_wav_bytes([pool[s] for s in seq], note_duration=duration)
-                    render_audio_with_highlight(
-                        wav_bytes=wav,
-                        labels=seq,
-                        note_duration=duration,
-                        gap=0.03,
-                        loop=False,
-                        element_id="sequence",
-                    )
+                    st.audio(wav, format="audio/wav")
 
 # ----------- Ear Tuning (Play all notes available) -----------
 st.markdown("---")
 st.subheader("🎧 Ear Tuning")
+
+tuning_area = st.empty()
 
 st.caption("Play all available notes for the selected settings to tune your ear. The currently playing note will highlight.")
 
