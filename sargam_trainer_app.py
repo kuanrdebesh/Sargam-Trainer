@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
-import sounddevice as sd
+import io
+import wave
 import random
 
 # ==========================================
@@ -67,12 +68,42 @@ RAGA_DEF = {
 # Audio
 # ==========================================
 
-def play_tone(freq, duration):
-    t = np.linspace(0, duration, int(SAMPLE_RATE * duration), False)
-    tone = np.sin(2 * np.pi * freq * t) * VOLUME
-    sd.play(tone, SAMPLE_RATE)
-    sd.wait()
+def _tone_wave(freq, duration, sr=SAMPLE_RATE):
+    t = np.linspace(0, duration, int(sr * duration), False)
+    tone = (np.sin(2 * np.pi * freq * t) * VOLUME).astype(np.float32)
+    # small fade in/out to avoid clicks
+    fade_len = int(sr * 0.005)  # 5 ms
+    if fade_len > 0 and tone.size > 2 * fade_len:
+        fade = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+        tone[:fade_len] *= fade
+        tone[-fade_len:] *= fade[::-1]
+    return tone
 
+def _wav_bytes(samples, sr=SAMPLE_RATE):
+    samples = np.clip(samples, -1.0, 1.0)
+    pcm = (samples * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(sr)
+        wf.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+def play_tone(freq, duration):
+    audio = _wav_bytes(_tone_wave(freq, duration))
+    st.audio(audio, format='audio/wav')
+
+def play_sequence(freqs, duration, gap=0.02):
+    parts = []
+    for f in freqs:
+        parts.append(_tone_wave(f, duration))
+        if gap and gap > 0:
+            parts.append(np.zeros(int(SAMPLE_RATE * gap), dtype=np.float32))
+    if not parts:
+        return
+    audio = _wav_bytes(np.concatenate(parts))
+    st.audio(audio, format='audio/wav')
 
 # ==========================================
 # Sequence Generation
