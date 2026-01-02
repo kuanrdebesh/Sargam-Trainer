@@ -11,7 +11,7 @@ import base64
 # ==========================================
 SAMPLE_RATE = 44100
 NOTE_VOLUME = 0.25
-TANPURA_VOLUME = 0.65
+TANPURA_VOLUME = 0.9
 WESTERN_SA_MAP = {
     "C": 261.63, "C#": 277.18, "DB": 277.18,
     "D": 293.66, "D#": 311.13, "EB": 311.13,
@@ -107,6 +107,43 @@ def _one_pole_lowpass(x: np.ndarray, sr: int, cutoff_hz: float = 3800.0) -> np.n
         y0 = one_minus_a * x[i] + a * y0
         y[i] = y0
     return y
+
+
+def render_looping_audio(
+    wav_bytes: bytes,
+    volume: float = 0.6,
+    element_id: str = "looping-audio",
+    label: str | None = None,
+):
+    """Render a looping audio player that can play in parallel with other players.
+
+    Why HTML instead of st.audio?
+    - We can set loop=true reliably without generating a very long file.
+    - We can set the element volume via JS without regenerating audio.
+    """
+    if not wav_bytes:
+        st.warning("No audio to play.")
+        return
+
+    vol = float(np.clip(volume, 0.0, 1.0))
+    b64 = base64.b64encode(wav_bytes).decode("ascii")
+    title = f"<div style='font-weight:600;margin-bottom:6px'>{label}</div>" if label else ""
+
+    html = f"""
+    <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">
+      {title}
+      <audio id="{element_id}" controls loop style="width: 100%;">
+        <source src="data:audio/wav;base64,{b64}" type="audio/wav">
+      </audio>
+    </div>
+    <script>
+      (function() {{
+        const a = document.getElementById('{element_id}');
+        if (a) a.volume = {vol};
+      }})();
+    </script>
+    """
+    components.html(html, height=90)
 
 def _tiny_reverb(x: np.ndarray, sr: int) -> np.ndarray:
     """Very small reverb/room feel using a few short delays."""
@@ -475,15 +512,29 @@ def build_tanpura_wav_bytes(sa_freq: float, seconds: float = 60.0, sr: int = SAM
     out = out.astype(np.float32) * (TANPURA_VOLUME * level)
     return _wav_bytes(out, sr=sr)
 
-# Render tanpura if enabled (in sidebar so it doesn't clash with players below)
-if tanpura_on:
-    tanp_wav = build_tanpura_wav_bytes(WESTERN_SA_MAP[sa], seconds=180.0, level=tanpura_level)
-    if tanp_wav:
-        st.sidebar.markdown("### 🎶 Tanpura")
-        st.sidebar.caption("Press play to start the drone (long track). Adjust volume with the slider above.")
-        st.sidebar.audio(tanp_wav, format="audio/wav")
-    else:
-        st.sidebar.info("Tanpura is enabled but volume is 0.")
+
+@st.cache_data(show_spinner=False)
+def cached_tanpura_clip(sa_freq: float) -> bytes:
+    """Small tanpura clip (looped in browser).
+
+    Keeping it short avoids big CPU work and prevents the UI from becoming
+    unresponsive. We loop it in the browser using an HTML audio element.
+    """
+    return build_tanpura_wav_bytes(sa_freq, seconds=12.0, level=1.0)
+
+
+# ----------- Tanpura (plays in parallel) -----------
+# Render in the main area using an HTML <audio loop> element.
+# This keeps the UI responsive and lets Tanpura play alongside other players.
+if tanpura_on and tanpura_level > 0:
+    st.markdown("### 🎶 Tanpura")
+    st.caption("Press play once — it will loop, and you can still play sequences/ear-tuning on top.")
+    tanp_wav = cached_tanpura_clip(WESTERN_SA_MAP[sa])
+    render_looping_audio(wav_bytes=tanp_wav, volume=tanpura_level, element_id="tanpura")
+
+# We render Tanpura in the *main* area using an HTML audio element with loop=true.
+# This prevents long audio generation that can freeze the app, and it plays in
+# parallel with the other audio players.
 
 # ----------- Sequence Playback -----------
 audio_area = st.empty()
