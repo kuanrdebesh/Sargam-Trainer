@@ -348,7 +348,7 @@ def generate_raga(pool, count, raga, pattern):
 # ==========================================
 
 st.title("🎵 Sargam Trainer — Debesh's Version")
-
+st.caption("Train your ear to recognise swaras by sound — listen, guess, then verify.")
 st.markdown("Practice random sargam note recognition with tempo control.")
 
 with st.expander("📌 How to use", expanded=False):
