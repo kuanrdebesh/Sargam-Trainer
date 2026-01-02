@@ -11,7 +11,6 @@ import base64
 # ==========================================
 SAMPLE_RATE = 44100
 NOTE_VOLUME = 0.25
-TANPURA_VOLUME = 0.9
 WESTERN_SA_MAP = {
     "C": 261.63, "C#": 277.18, "DB": 277.18,
     "D": 293.66, "D#": 311.13, "EB": 311.13,
@@ -108,42 +107,6 @@ def _one_pole_lowpass(x: np.ndarray, sr: int, cutoff_hz: float = 3800.0) -> np.n
         y[i] = y0
     return y
 
-
-def render_looping_audio(
-    wav_bytes: bytes,
-    volume: float = 0.6,
-    element_id: str = "looping-audio",
-    label: str | None = None,
-):
-    """Render a looping audio player that can play in parallel with other players.
-
-    Why HTML instead of st.audio?
-    - We can set loop=true reliably without generating a very long file.
-    - We can set the element volume via JS without regenerating audio.
-    """
-    if not wav_bytes:
-        st.warning("No audio to play.")
-        return
-
-    vol = float(np.clip(volume, 0.0, 1.0))
-    b64 = base64.b64encode(wav_bytes).decode("ascii")
-    title = f"<div style='font-weight:600;margin-bottom:6px'>{label}</div>" if label else ""
-
-    html = f"""
-    <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">
-      {title}
-      <audio id="{element_id}" controls loop style="width: 100%;">
-        <source src="data:audio/wav;base64,{b64}" type="audio/wav">
-      </audio>
-    </div>
-    <script>
-      (function() {{
-        const a = document.getElementById('{element_id}');
-        if (a) a.volume = {vol};
-      }})();
-    </script>
-    """
-    components.html(html, height=90)
 
 def _tiny_reverb(x: np.ndarray, sr: int) -> np.ndarray:
     """Very small reverb/room feel using a few short delays."""
@@ -437,105 +400,6 @@ play_mode = st.sidebar.radio(
     help="All at once plays one continuous audio clip. Individual mode shows one player per note.",
 )
 
-st.sidebar.subheader("Tanpura (Drone)")
-tanpura_on = st.sidebar.checkbox("Enable Tanpura", value=False)
-tanpura_level = st.sidebar.slider("Tanpura volume", 0.0, 1.0, 0.6, 0.05) if tanpura_on else 0.0
-
-def _tanpura_pluck(freq: float, sr: int, pluck_len: float = 2.4) -> np.ndarray:
-    """A tanpura-like pluck with long decay and rich harmonics."""
-    n = int(sr * pluck_len)
-    t = np.linspace(0, pluck_len, n, endpoint=False, dtype=np.float32)
-
-    # Harmonics for a string drone (tanpura-ish)
-    sig = np.zeros(n, dtype=np.float32)
-    for k in range(1, 13):
-        amp = 1.0 / (k ** 1.15)
-        # slightly stronger odd harmonics for woody feel
-        if k % 2 == 1:
-            amp *= 1.12
-        fk = freq * k * (1.0 + np.random.uniform(-0.0004, 0.0004))
-        sig += amp * np.sin(2 * np.pi * fk * t)
-
-    # Very long, smooth decay envelope
-    env = _adsr_envelope(n, sr, attack=0.004, decay=0.18, sustain=0.55, release=1.2)
-    sig *= env
-
-    # Slight buzzing/noise at the beginning (jawari feel)
-    noise = np.random.normal(0.0, 1.0, n).astype(np.float32)
-    buzz_env = _adsr_envelope(n, sr, attack=0.001, decay=0.07, sustain=0.0, release=0.05)
-    sig += 0.06 * noise * buzz_env
-
-    sig = _one_pole_lowpass(sig, sr, cutoff_hz=3200.0)
-    return sig.astype(np.float32)
-
-def build_tanpura_wav_bytes(sa_freq: float, seconds: float = 60.0, sr: int = SAMPLE_RATE, level: float = 0.25) -> bytes:
-    """Tanpura-style drone using repeated plucks (Sa–Pa–Sa–Sa')."""
-    if level <= 0:
-        return b""
-    total_n = int(sr * seconds)
-    if total_n <= 0:
-        return b""
-
-    out = np.zeros(total_n, dtype=np.float32)
-
-    pa = sa_freq * (3/2)
-    upper_sa = sa_freq * 2.0
-
-    # Typical tanpura cycle (approx): Sa, Pa, Sa, upper Sa (varies by style)
-    cycle = [sa_freq, pa, sa_freq, upper_sa]
-    interval = 1.65  # seconds between plucks (feel free to tweak)
-    pluck_len = 2.8  # pluck tail overlaps next pluck
-
-    t0 = 0.0
-    idx = 0
-    while t0 < seconds:
-        f = cycle[idx % len(cycle)]
-        pl = _tanpura_pluck(f, sr=sr, pluck_len=pluck_len)
-        start = int(t0 * sr)
-        end = min(total_n, start + pl.size)
-        if start < total_n:
-            out[start:end] += pl[:end-start]
-        t0 += interval
-        idx += 1
-
-    # Gentle slow amplitude motion
-    t = np.linspace(0, seconds, total_n, endpoint=False, dtype=np.float32)
-    mod = 0.92 + 0.08 * np.sin(2 * np.pi * 0.18 * t + 0.5)
-    out *= mod
-
-    # A bit more room + normalize
-    out = _tiny_reverb(out, sr)
-    peak = float(np.max(np.abs(out))) if out.size else 1.0
-    if peak > 0:
-        out = out / peak
-
-    out = out.astype(np.float32) * (TANPURA_VOLUME * level)
-    return _wav_bytes(out, sr=sr)
-
-
-@st.cache_data(show_spinner=False)
-def cached_tanpura_clip(sa_freq: float) -> bytes:
-    """Small tanpura clip (looped in browser).
-
-    Keeping it short avoids big CPU work and prevents the UI from becoming
-    unresponsive. We loop it in the browser using an HTML audio element.
-    """
-    return build_tanpura_wav_bytes(sa_freq, seconds=12.0, level=1.0)
-
-
-# ----------- Tanpura (plays in parallel) -----------
-# Render in the main area using an HTML <audio loop> element.
-# This keeps the UI responsive and lets Tanpura play alongside other players.
-if tanpura_on and tanpura_level > 0:
-    st.markdown("### 🎶 Tanpura")
-    st.caption("Press play once — it will loop, and you can still play sequences/ear-tuning on top.")
-    tanp_wav = cached_tanpura_clip(WESTERN_SA_MAP[sa])
-    render_looping_audio(wav_bytes=tanp_wav, volume=tanpura_level, element_id="tanpura")
-
-# We render Tanpura in the *main* area using an HTML audio element with loop=true.
-# This prevents long audio generation that can freeze the app, and it plays in
-# parallel with the other audio players.
-
 # ----------- Sequence Playback -----------
 audio_area = st.empty()
 if "seq" in st.session_state:
@@ -558,6 +422,15 @@ if "seq" in st.session_state:
                     st.caption("Notes are hidden until you click **Reveal Notes**.")
                     wav = build_sequence_wav_bytes([pool[s] for s in seq], note_duration=duration)
                     st.audio(wav, format="audio/wav")
+
+
+# Reveal notes for the generated sequence (kept under Sequence section, not Ear Tuning)
+if st.button("👁 Reveal Notes", key="reveal_sequence"):
+    if "seq" in st.session_state:
+        st.write("Sequence:", " ".join(st.session_state["seq"]))
+    else:
+        st.info("Generate a sequence first.")
+
 
 # ----------- Ear Tuning (Play all notes available) -----------
 st.markdown("---")
@@ -593,10 +466,4 @@ if st.button("Play all available notes"):
             loop=False,
             element_id="tuning",
         )
-
-if st.button("👁 Reveal Notes"):
-    if "seq" in st.session_state:
-        st.write("Sequence:", " ".join(st.session_state["seq"]))
-    else:
-        st.info("Generate a sequence first.")
 
