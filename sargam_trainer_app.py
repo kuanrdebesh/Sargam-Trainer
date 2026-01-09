@@ -2,7 +2,7 @@ import streamlit as st
 import numpy as np
 import random
 import io
-import soundfile as sf
+import wave
 
 # ----------------------------
 # Constants & Definitions
@@ -35,43 +35,56 @@ PAKAD_DEF = {
 }
 
 # ----------------------------
-# Harmonium Sound Engine
+# Harmonium-ish Sound Engine (pure numpy + wave)
 # ----------------------------
 
 def harmonium_wave(freq, duration):
     t = np.linspace(0, duration, int(SAMPLE_RATE * duration), False)
 
     # Fundamental + harmonics (organ-like)
-    wave = (
+    wave_sig = (
         1.0 * np.sin(2 * np.pi * freq * t) +
         0.6 * np.sin(2 * np.pi * 2 * freq * t) +
         0.3 * np.sin(2 * np.pi * 3 * freq * t) +
         0.15 * np.sin(2 * np.pi * 4 * freq * t)
     )
 
-    # ADSR Envelope (harmonium feel)
-    attack = int(0.08 * SAMPLE_RATE)
-    release = int(0.15 * SAMPLE_RATE)
-    sustain = len(wave) - attack - release
+    # ADSR envelope (avoid clicks)
+    attack = int(0.06 * SAMPLE_RATE)
+    release = int(0.12 * SAMPLE_RATE)
+    sustain = max(0, len(wave_sig) - attack - release)
 
-    envelope = np.concatenate([
-        np.linspace(0, 1, attack),
+    env = np.concatenate([
+        np.linspace(0, 1, attack, endpoint=False),
         np.ones(sustain),
-        np.linspace(1, 0, release)
-    ])
+        np.linspace(1, 0, release, endpoint=True)
+    ]) if sustain > 0 else np.linspace(0, 1, len(wave_sig), endpoint=True)
 
-    return wave * envelope
+    return wave_sig * env
 
-def build_sequence_wav_bytes(freqs, duration):
-    audio = np.concatenate([harmonium_wave(f, duration) for f in freqs])
 
-    # Normalize & soften
-    audio /= np.max(np.abs(audio)) + 1e-6
-    audio *= 0.6
+def wav_bytes_from_audio(audio: np.ndarray) -> bytes:
+    # Normalize
+    peak = np.max(np.abs(audio)) + 1e-9
+    audio = (audio / peak) * 0.6
+
+    # Convert to 16-bit PCM mono
+    audio_int16 = np.int16(np.clip(audio, -1.0, 1.0) * 32767)
 
     buf = io.BytesIO()
-    sf.write(buf, audio, SAMPLE_RATE, format="WAV")
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(audio_int16.tobytes())
     return buf.getvalue()
+
+
+def build_sequence_wav_bytes(freqs, duration):
+    if not freqs:
+        return b""
+    audio = np.concatenate([harmonium_wave(f, duration) for f in freqs])
+    return wav_bytes_from_audio(audio)
 
 # ----------------------------
 # Note Pools
@@ -89,6 +102,7 @@ def build_pool_free(sa_freq, octaves):
         for s,r in ratios.items():
             pool[s+o] = sa_freq * r * mul
     return pool
+
 
 def build_pool_raga(sa_freq, raga, octaves):
     base = build_pool_free(sa_freq, ["M"])
@@ -129,7 +143,7 @@ if mode == "free" and ear_mode != "Play all notes":
     st.warning("Only 'Play all notes' is available in Free mode.")
     st.stop()
 
-# Pakad Mode
+# Pakad Mode: show ALL pakads as buttons
 if ear_mode == "Play Pakad (Mukhyan)" and mode == "raga":
     st.subheader("Pakad (Mukhyan)")
     for i, pakad in enumerate(PAKAD_DEF[raga]):
@@ -137,9 +151,10 @@ if ear_mode == "Play Pakad (Mukhyan)" and mode == "raga":
         if st.button(f"Play: {label}", key=f"pakad_{i}"):
             labels = [n+octaves[0] if len(n)==1 else n for n in pakad]
             freqs = [pool[l] for l in labels if l in pool]
-            st.audio(build_sequence_wav_bytes(freqs, duration))
+            st.audio(build_sequence_wav_bytes(freqs, duration), format="audio/wav")
     st.stop()
 
+# Other Ear Tuning modes
 if st.button("Play Ear Tuning"):
     if ear_mode == "Play all notes":
         labels = sorted(pool.keys(), key=lambda k: pool[k])
@@ -149,5 +164,5 @@ if st.button("Play Ear Tuning"):
         labels = [n+octaves[0] for n in RAGA_DEF[raga]["avroh"]]
 
     freqs = [pool[l] for l in labels if l in pool]
-    st.audio(build_sequence_wav_bytes(freqs, duration))
+    st.audio(build_sequence_wav_bytes(freqs, duration), format="audio/wav")
     st.write(" → ".join(labels))
