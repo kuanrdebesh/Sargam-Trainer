@@ -1,168 +1,520 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import numpy as np
-import random
 import io
 import wave
+import random
+import base64
 
-# ----------------------------
-# Constants & Definitions
-# ----------------------------
-
+# ==========================================
+# Globals
+# ==========================================
 SAMPLE_RATE = 44100
-
+NOTE_VOLUME = 0.25
 WESTERN_SA_MAP = {
-    "C": 261.63, "C#": 277.18, "D": 293.66, "D#": 311.13,
-    "E": 329.63, "F": 349.23, "F#": 369.99, "G": 392.00,
-    "G#": 415.30, "A": 440.00, "A#": 466.16, "B": 493.88,
+    "C": 261.63, "C#": 277.18, "DB": 277.18,
+    "D": 293.66, "D#": 311.13, "EB": 311.13,
+    "E": 329.63,
+    "F": 349.23, "F#": 369.99, "GB": 369.99,
+    "G": 392.00, "G#": 415.30, "AB": 415.30,
+    "A": 440.00, "A#": 466.16, "BB": 466.16,
+    "B": 493.88,
 }
+
+SWARA_OFFSETS = [
+    ("S",0),("r",1),("R",2),("g",3),
+    ("G",4),("m",5),("M",6),
+    ("P",7),("d",8),("D",9),
+    ("n",10),("N",11)
+]
+SWARA_TO_OFFSET = {s:o for s,o in SWARA_OFFSETS}
+
+OCTAVE_FACTORS = {"L":0.5,"M":1.0,"U":2.0}
+OCTAVE_SUFFIX  = {"L":",","M":"","U":"'"}
 
 RAGA_DEF = {
-    "Yaman": {"aaroh": ["N","R","G","M","D","N","S"], "avroh": ["S","N","D","P","M","G","R","S"]},
-    "Bhoop": {"aaroh": ["S","R","G","P","D","S"], "avroh": ["S","D","P","G","R","S"]},
-    "Bhairavi": {"aaroh": ["S","r","g","m","P","d","n","S"], "avroh": ["S","n","d","P","m","g","r","S"]},
-    "Bhimpalasi": {"aaroh": ["S","g","m","P","n","S"], "avroh": ["S","n","D","P","m","g","R","S"]},
-    "Durga": {"aaroh": ["S","R","m","P","D","S"], "avroh": ["S","D","P","m","R","S"]},
-    "Khamaj": {"aaroh": ["S","R","G","m","P","D","N","S"], "avroh": ["S","n","D","P","m","G","R","S"]},
+    "Yaman":{
+        "swaras":["S","R","G","M","P","D","N"],
+        "aaroh":["N","R","G","M","P","D","N","S"],
+        "avroh":["S","N","D","P","M","G","R","S"]
+    },
+    "Bhairavi":{
+        "swaras":["S","r","g","m","P","d","n"],
+        "aaroh":["S","r","g","m","P","d","n","S"],
+        "avroh":["S","n","d","P","m","g","r","S"]
+    },
+    "Bhoop":{
+        "swaras":["S","R","G","P","D"],
+        "aaroh":["S","R","G","P","D","S"],
+        "avroh":["S","D","P","G","R","S"]
+    },
+    "Bhimpalasi":{
+        "swaras":["S","R","g","m","P","D","n","N"],
+        "aaroh":["n","S","g","m","P","N","S"],
+        "avroh":["S","N","D","P","m","g","R","S"]
+    },
+    "Durga":{
+        "swaras":["S","R","m","P","D"],
+        "aaroh":["S","R","m","P","D","S"],
+        "avroh":["S","D","P","m","R","S"]
+    },
+    "Khamaj":{
+        "swaras":["S","R","G","m","P","D","N","n"],
+        "aaroh":["S","G","M","P","D","N","S"],
+        "avroh":["S","n","D","P","M","G","R","S"]
+    }
 }
 
-PAKAD_DEF = {
-    "Yaman": [["N","R","G"],["N","R","M","G"],["M","P"],["M","D","P","N","D","P","M","R","G","R"],["N","R","D","N","S"]],
-    "Bhoop": [["G","R","G"],["P","G"],["D","P"],["S","U","D","P","G"],["P","G","R","G"],["G","R","S"]],
-    "Bhairavi": [["g","S","r","S"],["g","m","P"],["d","m","d","n","S","U"],["r","U","S","U","d","P","g","m","r","S"]],
-    "Bhimpalasi": [["n","S","g","m","P"],["n","D","P"],["S","U"],["n","D","P"],["m","g","R","S"]],
-    "Durga": [["m","P","D"],["m","R","D","S"],["R","R","P"]],
-    "Khamaj": [["G","m","P","D"],["G","m","G"],["P","S","U","N","S","U"],["n","D","P"],["m","P","m","G"],["R","S"]],
-}
+# ==========================================
+# Audio
+# ==========================================
 
-# ----------------------------
-# Harmonium-ish Sound Engine (pure numpy + wave)
-# ----------------------------
+# ==========================================
+# Audio (Streamlit Cloud friendly)
+# - Generates WAV bytes and plays in browser via st.audio()
+# ==========================================
 
-def harmonium_wave(freq, duration):
-    t = np.linspace(0, duration, int(SAMPLE_RATE * duration), False)
+def _adsr_envelope(n: int, sr: int, attack: float = 0.01, decay: float = 0.08, sustain: float = 0.70, release: float = 0.14) -> np.ndarray:
+    """Simple ADSR envelope."""
+    attack_n = max(1, int(sr * attack))
+    decay_n = max(1, int(sr * decay))
+    release_n = max(1, int(sr * release))
+    sustain_n = max(0, n - (attack_n + decay_n + release_n))
 
-    # Fundamental + harmonics (organ-like)
-    wave_sig = (
-        1.0 * np.sin(2 * np.pi * freq * t) +
-        0.6 * np.sin(2 * np.pi * 2 * freq * t) +
-        0.3 * np.sin(2 * np.pi * 3 * freq * t) +
-        0.15 * np.sin(2 * np.pi * 4 * freq * t)
-    )
+    a = np.linspace(0.0, 1.0, attack_n, endpoint=False)
+    d = np.linspace(1.0, sustain, decay_n, endpoint=False)
+    s = np.full(sustain_n, sustain, dtype=np.float32)
+    r = np.linspace(sustain, 0.0, release_n, endpoint=True)
 
-    # ADSR envelope (avoid clicks)
-    attack = int(0.06 * SAMPLE_RATE)
-    release = int(0.12 * SAMPLE_RATE)
-    sustain = max(0, len(wave_sig) - attack - release)
+    env = np.concatenate([a, d, s, r]).astype(np.float32)
+    if env.size < n:
+        env = np.pad(env, (0, n - env.size))
+    else:
+        env = env[:n]
+    return env
 
-    env = np.concatenate([
-        np.linspace(0, 1, attack, endpoint=False),
-        np.ones(sustain),
-        np.linspace(1, 0, release, endpoint=True)
-    ]) if sustain > 0 else np.linspace(0, 1, len(wave_sig), endpoint=True)
+def _one_pole_lowpass(x: np.ndarray, sr: int, cutoff_hz: float = 3800.0) -> np.ndarray:
+    """Light low-pass filter for a softer, less 'beepy' tone."""
+    if cutoff_hz <= 0:
+        return x
+    # One-pole low-pass: y[n] = (1-a)*x[n] + a*y[n-1]
+    a = float(np.exp(-2.0 * np.pi * cutoff_hz / sr))
+    y = np.empty_like(x, dtype=np.float32)
+    y0 = 0.0
+    one_minus_a = 1.0 - a
+    for i in range(x.size):
+        y0 = one_minus_a * x[i] + a * y0
+        y[i] = y0
+    return y
 
-    return wave_sig * env
 
+def _tiny_reverb(x: np.ndarray, sr: int) -> np.ndarray:
+    """Very small reverb/room feel using a few short delays."""
+    delays_ms = [28, 41, 57]
+    gains = [0.25, 0.18, 0.12]
+    y = x.astype(np.float32).copy()
+    for d_ms, g in zip(delays_ms, gains):
+        d = int(sr * (d_ms / 1000.0))
+        if d <= 0 or d >= y.size:
+            continue
+        y[d:] += g * x[:-d]
+    # gentle damping
+    y = _one_pole_lowpass(y, sr, cutoff_hz=5200.0)
+    return y
 
-def wav_bytes_from_audio(audio: np.ndarray) -> bytes:
-    # Normalize
-    peak = np.max(np.abs(audio)) + 1e-9
-    audio = (audio / peak) * 0.6
+def _tone_wave(freq: float, duration: float, sr: int = SAMPLE_RATE, volume: float = NOTE_VOLUME) -> np.ndarray:
+    """More natural tone: harmonics + slight detune + ADSR + soft filtering."""
+    n = int(sr * duration)
+    if n <= 0:
+        return np.zeros(0, dtype=np.float32)
 
-    # Convert to 16-bit PCM mono
-    audio_int16 = np.int16(np.clip(audio, -1.0, 1.0) * 32767)
+    t = np.linspace(0, duration, n, endpoint=False, dtype=np.float32)
+
+    # Add harmonics (string-like): 1..8 with rolloff.
+    # Slight random detune per note to avoid robotic feel.
+    detune_cents = np.random.uniform(-4.0, 4.0)
+    detune = 2 ** (detune_cents / 1200.0)
+    f0 = freq * detune
+
+    sig = np.zeros(n, dtype=np.float32)
+    # Fundamental stronger, higher harmonics softer
+    for k in range(1, 9):
+        amp = 1.0 / (k ** 1.25)
+        # tiny per-harmonic detune for richness
+        fk = f0 * k * (1.0 + np.random.uniform(-0.0008, 0.0008))
+        sig += amp * np.sin(2 * np.pi * fk * t)
+
+    # Breath/noise very subtly (attack realism)
+    noise = np.random.normal(0.0, 1.0, n).astype(np.float32)
+    noise_env = _adsr_envelope(n, sr, attack=0.002, decay=0.05, sustain=0.0, release=0.05)
+    sig += 0.03 * noise * noise_env
+
+    # Envelope & tone shaping
+    env = _adsr_envelope(n, sr, attack=0.008, decay=0.10, sustain=0.72, release=0.16)
+    sig *= env
+
+    # Softer top-end + a hint of room
+    sig = _one_pole_lowpass(sig, sr, cutoff_hz=4200.0)
+    sig = _tiny_reverb(sig, sr)
+
+    # Normalize gently and apply volume
+    peak = float(np.max(np.abs(sig))) if sig.size else 1.0
+    if peak > 0:
+        sig = sig / peak
+    sig *= float(volume)
+    return sig.astype(np.float32)
+
+def _wav_bytes(waveform: np.ndarray, sr: int = SAMPLE_RATE) -> bytes:
+    """Convert float32 waveform [-1,1] to 16-bit PCM WAV bytes."""
+    if waveform.size == 0:
+        return b""
+    pcm = np.clip(waveform, -1.0, 1.0)
+    pcm = (pcm * 32767).astype(np.int16)
 
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)  # 16-bit
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(audio_int16.tobytes())
+        wf.setframerate(sr)
+        wf.writeframes(pcm.tobytes())
     return buf.getvalue()
 
+def build_sequence_wav_bytes(freqs: list[float], note_duration: float, gap: float = 0.03) -> bytes:
+    """Build one continuous WAV (sequence), so UI shows a single audio player."""
+    parts: list[np.ndarray] = []
+    if gap and gap > 0:
+        silence = np.zeros(int(SAMPLE_RATE * gap), dtype=np.float32)
+    else:
+        silence = None
 
-def build_sequence_wav_bytes(freqs, duration):
-    if not freqs:
-        return b""
-    audio = np.concatenate([harmonium_wave(f, duration) for f in freqs])
-    return wav_bytes_from_audio(audio)
+    for f in freqs:
+        parts.append(_tone_wave(f, note_duration))
+        if silence is not None:
+            parts.append(silence)
 
-# ----------------------------
-# Note Pools
-# ----------------------------
+    waveform = np.concatenate(parts) if parts else np.array([], dtype=np.float32)
+    return _wav_bytes(waveform, SAMPLE_RATE)
 
-def build_pool_free(sa_freq, octaves):
-    ratios = {
-        "S":1, "r":16/15, "R":9/8, "g":6/5, "G":5/4,
-        "m":4/3, "M":45/32, "P":3/2, "d":8/5,
-        "D":5/3, "n":9/5, "N":15/8,
-    }
+
+def render_audio_with_highlight(
+    wav_bytes: bytes,
+    labels: list[str],
+    note_duration: float,
+    gap: float,
+    loop: bool = False,
+    element_id: str = "player",
+):
+    """Render a single HTML audio player and highlight the current note as it plays."""
+    if not wav_bytes:
+        st.warning("No audio to play.")
+        return
+
+    b64 = base64.b64encode(wav_bytes).decode("ascii")
+    total_step = max(note_duration + gap, 0.0001)
+
+    # Simple inline HTML + JS. Works on Streamlit Cloud.
+    html = f"""
+    <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;">
+      <audio id="{element_id}" controls {"loop" if loop else ""} style="width: 100%;">
+        <source src="data:audio/wav;base64,{b64}" type="audio/wav">
+      </audio>
+
+      <div id="{element_id}-notes" style="margin-top: 10px; line-height: 2.2;">
+        {''.join([f'<span class="note-chip" data-idx="{i}" style="display:inline-block;padding:4px 10px;margin:4px;border-radius:999px;border:1px solid #ddd;">{lab}</span>' for i, lab in enumerate(labels)])}
+      </div>
+    </div>
+
+    <script>
+      (function() {{
+        const audio = document.getElementById("{element_id}");
+        const chips = Array.from(document.querySelectorAll("#{element_id}-notes .note-chip"));
+        const step = {total_step};
+
+        function clearActive() {{
+          chips.forEach(c => {{
+            c.style.background = "";
+            c.style.borderColor = "#ddd";
+            c.style.fontWeight = "400";
+          }});
+        }}
+
+        function setActive(i) {{
+          clearActive();
+          if (i >= 0 && i < chips.length) {{
+            const c = chips[i];
+            c.style.background = "rgba(255, 210, 0, 0.25)";
+            c.style.borderColor = "rgba(255, 160, 0, 0.8)";
+            c.style.fontWeight = "600";
+          }}
+        }}
+
+        let lastIdx = -1;
+
+        function tick() {{
+          if (!audio || audio.paused) return;
+          const t = audio.currentTime || 0;
+          const idx = Math.floor(t / step);
+          if (idx !== lastIdx) {{
+            lastIdx = idx;
+            setActive(idx);
+          }}
+        }}
+
+        audio.addEventListener("play", () => {{
+          lastIdx = -1;
+          tick();
+        }});
+
+        audio.addEventListener("timeupdate", tick);
+
+        audio.addEventListener("ended", () => {{
+          clearActive();
+        }});
+
+        // click a note to jump
+        chips.forEach(c => {{
+          c.addEventListener("click", () => {{
+            const i = parseInt(c.getAttribute("data-idx"));
+            audio.currentTime = i * step;
+            audio.play();
+          }});
+        }});
+      }})();
+    </script>
+    """
+
+    components.html(html, height=150 + (len(labels)//6)*30)
+
+
+
+
+
+
+# ==========================================
+# Sequence Generation
+# ==========================================
+
+def build_pool_free(sa_freq, komal, octaves):
+    swaras = [s for s,_ in SWARA_OFFSETS] if komal else ["S","R","G","m","P","D","N"]
     pool = {}
     for o in octaves:
-        mul = {"L":0.5,"M":1,"U":2}[o]
-        for s,r in ratios.items():
-            pool[s+o] = sa_freq * r * mul
+        for s in swaras:
+            sym = s + OCTAVE_SUFFIX[o]
+            pool[sym] = sa_freq * OCTAVE_FACTORS[o] * (2 ** (SWARA_TO_OFFSET[s] / 12))
     return pool
-
 
 def build_pool_raga(sa_freq, raga, octaves):
-    base = build_pool_free(sa_freq, ["M"])
-    swaras = set(RAGA_DEF[raga]["aaroh"] + RAGA_DEF[raga]["avroh"])
+    swaras = RAGA_DEF[raga]["swaras"]
     pool = {}
     for o in octaves:
-        mul = {"L":0.5,"M":1,"U":2}[o]
         for s in swaras:
-            pool[s+o] = base[s+"M"] * mul
+            sym = s + OCTAVE_SUFFIX[o]
+            pool[sym] = sa_freq * OCTAVE_FACTORS[o] * (2 ** (SWARA_TO_OFFSET[s] / 12))
     return pool
 
-# ----------------------------
-# UI
-# ----------------------------
+def generate_free(pool, count):
+    keys = list(pool.keys())
+    return [random.choice(keys) for _ in range(count)]
 
-st.title("🎵 Sargam Trainer")
+def generate_raga(pool, count, raga, pattern):
+    if pattern == "free":
+        return generate_free(pool, count)
 
-mode = st.radio("Mode", ["free","raga"], horizontal=True)
-sa = st.selectbox("Base Sa", list(WESTERN_SA_MAP.keys()))
-octaves = st.multiselect("Octaves", ["L","M","U"], default=["M"])
-duration = st.slider("Note duration (seconds)", 0.3, 2.0, 0.8, 0.1)
+    order = RAGA_DEF[raga]["aaroh"] if pattern == "aaroh" else RAGA_DEF[raga]["avroh"]
 
-if mode == "raga":
-    raga = st.selectbox("Raga", list(RAGA_DEF.keys()))
+    mapping = {}
+    for sym in pool:
+        base = sym.rstrip("',")
+        mapping.setdefault(base, []).append(sym)
 
-st.header("🎧 Ear Tuning")
+    valid = [s for s in order if s in mapping]
+    rank = {s: i for i, s in enumerate(order)}
 
-ear_mode = st.radio(
-    "Play Mode",
-    ["Play all notes","Play Aaroh","Play Avroh","Play Pakad (Mukhyan)"],
-    horizontal=True
+    cur = random.choice(valid)
+    seq = [random.choice(mapping[cur])]
+    cr = rank[cur]
+
+    for _ in range(1, count):
+        allowed = [s for s in valid if (rank[s] >= cr if pattern=="aaroh" else rank[s] <= cr)]
+        if not allowed:
+            allowed = valid
+        cur = random.choice(allowed)
+        seq.append(random.choice(mapping[cur]))
+        cr = rank[cur]
+    return seq
+
+# ==========================================
+# Streamlit UI
+# ==========================================
+
+st.title("🎵 Sargam Trainer — Debesh's Version")
+st.caption("Train your ear to recognise swaras by sound — listen, guess, then verify.")
+st.markdown("Practice random sargam note recognition with tempo control.")
+
+with st.expander("📌 How to use", expanded=False):
+    st.markdown("""
+## 🎵 Sequence Practice (Guess-first)
+1. Select your **settings** from the left panel.
+2. Click **Generate New Sequence**.
+3. Click **Play Sequence** and try to identify the notes by ear.
+4. Once you’ve made a guess, click **Reveal Notes** to check.
+5. Generate a new sequence and repeat.
+
+---
+
+## 🎧 Ear Tuning (Pitch reference)
+Use this when you want to *learn or re-confirm* how each note sounds.
+
+1. Click **Play all notes** under Ear Tuning.
+2. The currently playing note will be highlighted.
+3. Match the pitch by humming or singing along.
+
+---
+
+## ⚙️ Settings Explained
+
+### 🎼 Notes / Swaras
+Choose which swaras you want to practice with.
+- Fewer notes → easier (good for beginners)
+- More notes → harder (better ear discrimination)
+
+### ⏱️ Note Duration
+Controls how long **each note is played**.
+- Longer duration → easier to identify
+- Shorter duration → harder, faster recognition
+
+### 🔁 Playback Mode
+- **Play all at once (default)**: one continuous sequence (recommended)
+- **Play each individually**: separate players per note (slow practice)
+
+### 🎚️ Sequence Length
+How many notes are in one sequence.
+- Start with 3–4 notes
+- Increase gradually as your ear improves
+
+---
+
+## 🧠 Practice Tips
+- Try guessing before revealing notes.
+- Repeat the same settings for a few minutes.
+- Use **Ear Tuning** whenever a note feels confusing.
+- Headphones recommended 🎧
+""")
+
+
+# ----------- Settings Sidebar -----------
+st.sidebar.header("Settings")
+
+mode = st.sidebar.selectbox("Mode", ["free", "raga"])
+
+sa = st.sidebar.selectbox("Sa (Base Note)", list(WESTERN_SA_MAP.keys()))
+
+if mode == "free":
+    komal = st.sidebar.checkbox("Include komal/teevra notes", True)
+else:
+    raga = st.sidebar.selectbox("Select Raga", list(RAGA_DEF.keys()))
+    pattern = st.sidebar.selectbox("Pattern", ["free", "aaroh", "avroh"])
+
+octaves = st.sidebar.multiselect("Octaves", ["L","M","U"], default=["M"])
+
+count = st.sidebar.slider("Notes per sequence", 1, 20, 8)
+
+bpm = st.sidebar.slider("Tempo (BPM)", 40, 200, 80)
+beats_per_note = st.sidebar.slider("Beats per Note", 0.25, 4.0, 1.0)
+
+duration = 60 / bpm * beats_per_note
+st.sidebar.write(f"Note Duration: {duration:.2f} sec")
+
+# ----------- Generate Sequence -----------
+if st.button("Generate New Sequence"):
+    sa_freq = WESTERN_SA_MAP[sa]
+
+    if mode == "free":
+        pool = build_pool_free(sa_freq, komal, octaves)
+        seq = generate_free(pool, count)
+    else:
+        pool = build_pool_raga(sa_freq, raga, octaves)
+        seq = generate_raga(pool, count, raga, pattern)
+
+    st.session_state["seq"] = seq
+    st.session_state["pool"] = pool
+    st.success("New sequence generated!")
+
+
+
+# ----------- Playback Preferences -----------
+st.sidebar.subheader("Playback")
+play_mode = st.sidebar.radio(
+    "Playback mode",
+    ["All at once", "Each note individually"],
+    index=0,
+    help="All at once plays one continuous audio clip. Individual mode shows one player per note.",
 )
 
-sa_freq = WESTERN_SA_MAP[sa]
-pool = build_pool_free(sa_freq, octaves) if mode == "free" else build_pool_raga(sa_freq, raga, octaves)
+# ----------- Sequence Playback -----------
+audio_area = st.empty()
+if "seq" in st.session_state:
+    seq = st.session_state["seq"]
+    pool = st.session_state.get("pool")
 
-if mode == "free" and ear_mode != "Play all notes":
-    st.warning("Only 'Play all notes' is available in Free mode.")
-    st.stop()
+    if st.button("▶ Play Sequence"):
+        if pool is None:
+            st.error("Please generate a sequence first.")
+        else:
+            with audio_area.container():
+                if play_mode == "Each note individually":
+                    st.markdown("**Sequence (individual notes)**")
+                    for i, sym in enumerate(seq, start=1):
+                        st.write(f"Note {i}")
+                        wav = build_sequence_wav_bytes([pool[sym]], note_duration=duration)
+                        st.audio(wav, format="audio/wav")
+                else:
+                    st.markdown("**Sequence (all at once)**")
+                    st.caption("Notes are hidden until you click **Reveal Notes**.")
+                    wav = build_sequence_wav_bytes([pool[s] for s in seq], note_duration=duration)
+                    st.audio(wav, format="audio/wav")
 
-# Pakad Mode: show ALL pakads as buttons
-if ear_mode == "Play Pakad (Mukhyan)" and mode == "raga":
-    st.subheader("Pakad (Mukhyan)")
-    for i, pakad in enumerate(PAKAD_DEF[raga]):
-        label = " → ".join(pakad)
-        if st.button(f"Play: {label}", key=f"pakad_{i}"):
-            labels = [n+octaves[0] if len(n)==1 else n for n in pakad]
-            freqs = [pool[l] for l in labels if l in pool]
-            st.audio(build_sequence_wav_bytes(freqs, duration), format="audio/wav")
-    st.stop()
 
-# Other Ear Tuning modes
-if st.button("Play Ear Tuning"):
-    if ear_mode == "Play all notes":
-        labels = sorted(pool.keys(), key=lambda k: pool[k])
-    elif ear_mode == "Play Aaroh":
-        labels = [n+octaves[0] for n in RAGA_DEF[raga]["aaroh"]]
-    elif ear_mode == "Play Avroh":
-        labels = [n+octaves[0] for n in RAGA_DEF[raga]["avroh"]]
+# Reveal notes for the generated sequence (kept under Sequence section, not Ear Tuning)
+if st.button("👁 Reveal Notes", key="reveal_sequence"):
+    if "seq" in st.session_state:
+        st.write("Sequence:", " ".join(st.session_state["seq"]))
+    else:
+        st.info("Generate a sequence first.")
 
-    freqs = [pool[l] for l in labels if l in pool]
-    st.audio(build_sequence_wav_bytes(freqs, duration), format="audio/wav")
-    st.write(" → ".join(labels))
+
+# ----------- Ear Tuning (Play all notes available) -----------
+st.markdown("---")
+st.subheader("🎧 Ear Tuning")
+
+tuning_area = st.empty()
+
+st.caption("Play all available notes for the selected settings to tune your ear. The currently playing note will highlight.")
+
+if st.button("Play all available notes"):
+    pool = st.session_state.get("pool")
+
+    # If user hasn't generated a sequence yet, build a pool from current settings.
+    if pool is None:
+        sa_freq = WESTERN_SA_MAP[sa]
+        if mode == "free":
+            pool = build_pool_free(sa_freq, komal, octaves)
+        else:
+            pool = build_pool_raga(sa_freq, raga, octaves)
+
+    # sort by frequency so it's musically sensible
+    items = sorted(pool.items(), key=lambda kv: kv[1])
+    labels = [k for k,_ in items]
+    freqs = [v for _,v in items]
+
+    wav = build_sequence_wav_bytes(freqs, note_duration=duration)
+    with tuning_area.container():
+        render_audio_with_highlight(
+            wav_bytes=wav,
+            labels=labels,
+            note_duration=duration,
+            gap=0.03,
+            loop=False,
+            element_id="tuning",
+        )
+
