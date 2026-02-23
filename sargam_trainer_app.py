@@ -62,7 +62,7 @@ RAGA_DEF = {
         "swaras":["S","R","G","m","P","D","N","n"],
         "aaroh":["S","G","M","P","D","N","S"],
         "avroh":["S","n","D","P","M","G","R","S"]
-    }
+    },
     "Puriya Dhanashree":{
         "swaras":["S","r","G","M","P","d","N"],
         "aaroh":["N","r","G","M","P","M","d","N","S"],
