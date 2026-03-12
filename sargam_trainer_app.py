@@ -67,6 +67,11 @@ RAGA_DEF = {
         "swaras":["S","r","G","M","P","d","N"],
         "aaroh":["N","r","G","M","P","M","d","N","S"],
         "avroh":["S","N","d","P","M","G","M","r","G","r","S"]
+    },
+     "Bageshree":{
+        "swaras":["S","R","g","M","P","D","n"],
+        "aaroh":["n","S","g","M","D","n","S"],
+        "avroh":["S","n","D","M","P","D","M","g","R","S"]
     }
 }
 
