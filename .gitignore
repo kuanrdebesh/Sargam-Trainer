@@ -1,0 +1,10 @@
+# Add this as .gitignore in Sargam-Trainer, then:
+#   git rm --cached .DS_Store
+#   git commit -m "Remove .DS_Store, add gitignore"
+
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
